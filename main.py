@@ -5,7 +5,7 @@ import json
 import re
 import traceback
 import fitz  # PyMuPDF
-import requests
+from huggingface_hub import InferenceClient
 
 app = FastAPI(title="MediChain API", version="1.0.3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -15,12 +15,13 @@ if not HF_API_KEY:
     print("CRITICAL ERROR: HF_API_KEY is not set.")
 
 # Use a model that's available on free Hugging Face Inference API
-# Options: meta-llama/Llama-2-7b-chat-hf, gpt2, distilgpt2, Qwen/Qwen2-7B-Instruct, mistralai/Mistral-7B-Instruct-v0.2
 HF_MODEL_NAME = os.environ.get("HF_MODEL_NAME", "meta-llama/Llama-2-7b-chat-hf")
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_NAME}"
 
 print(f"Using Hugging Face model: {HF_MODEL_NAME}")
-print(f"API URL: {HF_API_URL}")
+print(f"Initializing Inference Client...")
+
+# Initialize the HF client
+hf_client = InferenceClient(model=HF_MODEL_NAME, token=HF_API_KEY)
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     try:
@@ -44,62 +45,21 @@ def clean_json_response(text: str) -> str:
 
 def call_huggingface(prompt: str) -> str:
     try:
-        headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 1024,
-                "temperature": 0.7,
-                "do_sample": True
-            }
-        }
+        print(f"Calling HF model: {HF_MODEL_NAME}")
+        response = hf_client.text_generation(
+            prompt=prompt,
+            max_new_tokens=1024,
+            temperature=0.7,
+            do_sample=True,
+            top_p=0.95
+        )
         
-        print(f"Calling HF API: {HF_API_URL}")
-        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
+        print(f"HF Response received: {str(response)[:200]}")
         
-        # Check for 503 Service Unavailable (model loading)
-        if response.status_code == 503:
-            print("Model is loading, retrying in a moment...")
-            raise HTTPException(status_code=503, detail={
-                "error": "Model is loading",
-                "message": "This model is loading for the first time. Please retry in 30-60 seconds.",
-                "retry_after": 60
-            })
-        
-        response.raise_for_status()
-        
-        result = response.json()
-        print(f"HF Response type: {type(result)}, content: {str(result)[:200]}")
-        
-        # Handle different response formats
-        if isinstance(result, list) and len(result) > 0:
-            generated_text = result[0].get("generated_text", "")
-        else:
-            generated_text = result.get("generated_text", "")
-        
-        if not generated_text:
-            raise ValueError(f"No generated_text in response: {result}")
+        if not response:
+            raise ValueError("Empty response from Hugging Face")
             
-        return generated_text
-    except requests.exceptions.HTTPError as e:
-        print("="*60)
-        print(f"HUGGING FACE FAILED | HTTPError: {e}")
-        print(f"Response: {response.text if 'response' in locals() else 'N/A'}")
-        print(traceback.format_exc())
-        print("="*60)
-        raise HTTPException(status_code=502, detail={
-            "error": "Hugging Face API call failed",
-            "status_code": response.status_code if 'response' in locals() else "unknown",
-            "exception_msg": str(e),
-            "api_url": HF_API_URL,
-            "common_causes": [
-                "1. Model not found/available → try 'meta-llama/Llama-2-7b-chat-hf' or 'Qwen/Qwen2-7B-Instruct'",
-                "2. HF_API_KEY wrong/missing → regenerate at huggingface.co/settings/tokens",
-                "3. Model loading on first request → retry in 60 seconds",
-                "4. Rate limited → free tier has limits, wait before retrying",
-                "5. Gated model → need to request access on model page"
-            ]
-        })
+        return response
     except Exception as e:
         print("="*60)
         print(f"HUGGING FACE FAILED | {type(e).__name__}: {e}")
@@ -109,12 +69,14 @@ def call_huggingface(prompt: str) -> str:
             "error": "Hugging Face API call failed",
             "exception_type": type(e).__name__,
             "exception_msg": str(e),
-            "api_url": HF_API_URL,
+            "model": HF_MODEL_NAME,
             "common_causes": [
-                "1. HF_API_KEY wrong/missing",
-                "2. Network timeout",
-                "3. Model doesn't exist or is private",
-                "4. Check available models: https://huggingface.co/models"
+                "1. Model not accessible → verify HF_API_KEY is correct and has access",
+                "2. HF_API_KEY wrong/missing → regenerate at huggingface.co/settings/tokens",
+                "3. Gated model → accept license at https://huggingface.co/meta-llama/Llama-2-7b-chat-hf",
+                "4. Rate limited → free tier has limits, wait before retrying",
+                "5. Model loading on first request → retry in 60 seconds",
+                "6. Network/firewall issue → check outbound HTTPS to huggingface.co"
             ]
         })
 
