@@ -14,8 +14,12 @@ HF_API_KEY = os.environ.get("HF_API_KEY")
 if not HF_API_KEY:
     print("CRITICAL ERROR: HF_API_KEY is not set.")
 
-# Hugging Face API endpoint
-HF_API_URL = "google/gemma-4-31B-it"
+# Model selection - can be overridden via HF_MODEL_NAME env var
+HF_MODEL_NAME = os.environ.get("HF_MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.1")
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_NAME}"
+
+print(f"Using Hugging Face model: {HF_MODEL_NAME}")
+print(f"API URL: {HF_API_URL}")
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     try:
@@ -47,14 +51,24 @@ def call_huggingface(prompt: str) -> str:
                 "temperature": 0.7
             }
         }
+        
+        print(f"Calling HF API: {HF_API_URL}")
         response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         
         result = response.json()
-        # Extract generated text from response
+        print(f"HF Response type: {type(result)}, content: {str(result)[:200]}")
+        
+        # Handle different response formats
         if isinstance(result, list) and len(result) > 0:
-            return result[0].get("generated_text", "")
-        return result.get("generated_text", "")
+            generated_text = result[0].get("generated_text", "")
+        else:
+            generated_text = result.get("generated_text", "")
+        
+        if not generated_text:
+            raise ValueError(f"No generated_text in response: {result}")
+            
+        return generated_text
     except Exception as e:
         print("="*60)
         print(f"HUGGING FACE FAILED | {type(e).__name__}: {e}")
@@ -64,12 +78,14 @@ def call_huggingface(prompt: str) -> str:
             "error": "Hugging Face API call failed",
             "exception_type": type(e).__name__,
             "exception_msg": str(e),
+            "api_url": HF_API_URL,
             "common_causes": [
                 "1. HF_API_KEY wrong/missing → set in environment variables",
                 "2. Key invalid/expired → regenerate at huggingface.co/settings/tokens",
                 "3. Rate limited → wait before retrying",
                 "4. Network blocked → check firewall/proxy",
-                "5. Model loading → inference API may take time to load model on first request"
+                "5. Model not found → check HF_MODEL_NAME environment variable",
+                "6. Model loading → first inference request takes 30-60s to load model"
             ]
         })
 
@@ -77,8 +93,8 @@ def call_huggingface(prompt: str) -> str:
 def hf_test():
     """Call this first to confirm API key works before testing PDF."""
     try:
-        text = call_huggingface('Reply with only: {"status":"hf_ok"}')
-        return {"hf_reachable": True, "raw_response": text[:300]}
+        text = call_huggingface('Reply with only valid JSON: {"status":"hf_ok"}')
+        return {"hf_reachable": True, "raw_response": text[:300], "model": HF_MODEL_NAME}
     except HTTPException as e:
         return {"hf_reachable": False, "detail": e.detail}
 
@@ -120,8 +136,12 @@ JSON structure (null for missing fields):
     try:
         return json.loads(clean_json_response(raw))
     except (ValueError, json.JSONDecodeError) as e:
-        raise HTTPException(500, {"error": "Invalid JSON from Hugging Face", "parse_error": str(e), "gemini_output": raw[:500]})
+        raise HTTPException(500, {"error": "Invalid JSON from Hugging Face", "parse_error": str(e), "hf_output": raw[:500]})
 
 @app.get("/health", tags=["Meta"])
 def health():
-    return {"status": "ok", "api_key_configured": bool(HF_API_KEY)}
+    return {"status": "ok", "api_key_configured": bool(HF_API_KEY), "model": HF_MODEL_NAME}
+
+@app.get("/", tags=["Meta"])
+def root():
+    return {"message": "MediChain API is running", "model": HF_MODEL_NAME, "docs": "/docs"}
