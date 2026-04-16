@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install fastapi uvicorn huggingface_hub
+RUN pip install fastapi uvicorn huggingface_hub PyMuPDF
 
 COPY . .
 
