@@ -24,7 +24,7 @@ def get_model():
                 detail="GEMINI_API_KEY environment variable not set on Railway."
             )
         genai.configure(api_key=GEMINI_API_KEY)
-        _model = genai.GenerativeModel("gemini-2.0-flash")
+        _model = genai.GenerativeModel("gemini-3-flash-preview")
         print("Gemini model initialized.")
     return _model
 
