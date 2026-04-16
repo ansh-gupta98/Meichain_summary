@@ -15,7 +15,7 @@ if not HF_API_KEY:
     print("CRITICAL ERROR: HF_API_KEY is not set.")
 
 # Hugging Face API endpoint
-HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"
+HF_API_URL = "google/gemma-4-31B-it"
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     try:
