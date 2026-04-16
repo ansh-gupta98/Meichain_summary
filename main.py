@@ -1,28 +1,34 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import os
-import json
-import re
-import traceback
+import os, json, re, traceback
 import fitz  # PyMuPDF
-from huggingface_hub import InferenceClient
+import google.generativeai as genai
 
-app = FastAPI(title="MediChain API", version="1.0.3")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# ── App setup ────────────────────────────────────────────────────────────────
+app = FastAPI(title="MediChain API", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+)
 
-HF_API_KEY = os.environ.get("HF_API_KEY")
-if not HF_API_KEY:
-    print("CRITICAL ERROR: HF_API_KEY is not set.")
+# ── Gemini setup (lazy — won't crash on startup if key missing) ───────────────
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+_model = None  # initialized on first request, not at import time
 
-# Use a model that's available on free Hugging Face Inference API
-HF_MODEL_NAME = os.environ.get("HF_MODEL_NAME", "meta-llama/Llama-2-7b-chat-hf")
+def get_model():
+    global _model
+    if _model is None:
+        if not GEMINI_API_KEY:
+            raise HTTPException(
+                status_code=500,
+                detail="GEMINI_API_KEY environment variable not set on Railway."
+            )
+        genai.configure(api_key=GEMINI_API_KEY)
+        _model = genai.GenerativeModel("gemini-2.0-flash")
+        print("Gemini model initialized.")
+    return _model
 
-print(f"Using Hugging Face model: {HF_MODEL_NAME}")
-print(f"Initializing Inference Client...")
-
-# Initialize the HF client
-hf_client = InferenceClient(model=HF_MODEL_NAME, token=HF_API_KEY)
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -32,107 +38,148 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     except Exception as e:
         raise Exception(f"PyMuPDF error: {str(e)}")
 
-def clean_json_response(text: str) -> str:
-    if not text:
-        raise ValueError("Empty HF response")
-    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m: return m.group(1).strip()
-    m = re.search(r"```\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m: return m.group(1).strip()
-    s, e = text.find("{"), text.rfind("}")
-    if s != -1 and e > s: return text[s:e+1].strip()
-    raise ValueError(f"No JSON found: {text[:200]}")
 
-def call_huggingface(prompt: str) -> str:
+def clean_json_response(text: str) -> str:
+    """Strip markdown fences and extract the first {...} block."""
+    if not text:
+        raise ValueError("Empty Gemini response")
+    # Try ```json ... ``` block first
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Try plain ``` ... ``` block
+    m = re.search(r"```\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Fallback: first { ... } in the string
+    s, e = text.find("{"), text.rfind("}")
+    if s != -1 and e > s:
+        return text[s:e + 1].strip()
+    raise ValueError(f"No JSON object found in response: {text[:300]}")
+
+
+def call_gemini(prompt: str) -> str:
+    """Call Gemini and return raw text. Raises HTTPException on failure."""
     try:
-        print(f"Calling HF model: {HF_MODEL_NAME}")
-        response = hf_client.text_generation(
-            prompt=prompt,
-            max_new_tokens=1024,
-            temperature=0.7,
-            do_sample=True,
-            top_p=0.95
-        )
-        
-        print(f"HF Response received: {str(response)[:200]}")
-        
-        if not response:
-            raise ValueError("Empty response from Hugging Face")
-            
-        return response
+        model = get_model()
+        response = model.generate_content(prompt)
+        raw = response.text
+        if not raw:
+            raise ValueError("Gemini returned empty content.")
+        return raw
+    except HTTPException:
+        raise  # already formatted
     except Exception as e:
-        print("="*60)
-        print(f"HUGGING FACE FAILED | {type(e).__name__}: {e}")
+        print("=" * 60)
+        print(f"GEMINI FAILED | {type(e).__name__}: {e}")
         print(traceback.format_exc())
-        print("="*60)
+        print("=" * 60)
         raise HTTPException(status_code=502, detail={
-            "error": "Hugging Face API call failed",
+            "error": "Gemini API call failed",
             "exception_type": type(e).__name__,
             "exception_msg": str(e),
-            "model": HF_MODEL_NAME,
             "common_causes": [
-                "1. Model not accessible → verify HF_API_KEY is correct and has access",
-                "2. HF_API_KEY wrong/missing → regenerate at huggingface.co/settings/tokens",
-                "3. Gated model → accept license at https://huggingface.co/meta-llama/Llama-2-7b-chat-hf",
-                "4. Rate limited → free tier has limits, wait before retrying",
-                "5. Model loading on first request → retry in 60 seconds",
-                "6. Network/firewall issue → check outbound HTTPS to huggingface.co"
+                "GEMINI_API_KEY not set or invalid",
+                "Exceeded free-tier quota — check console.cloud.google.com",
+                "Network issue between Railway and Google APIs",
             ]
         })
 
-@app.get("/hf-test", tags=["Meta"])
-def hf_test():
-    """Call this first to confirm API key works before testing PDF."""
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/", tags=["Meta"])
+def root():
+    return {
+        "message": "MediChain API is running",
+        "model": "gemini-2.0-flash",
+        "docs": "/docs"
+    }
+
+
+@app.get("/health", tags=["Meta"])
+def health():
+    return {
+        "status": "ok",
+        "api_key_configured": bool(GEMINI_API_KEY),
+        "model": "gemini-2.0-flash"
+    }
+
+
+@app.get("/gemini-test", tags=["Meta"])
+def gemini_test():
+    """Quick smoke-test — call this before /pdf-to-json to confirm Gemini works."""
     try:
-        text = call_huggingface('Reply with only valid JSON: {"status":"hf_ok"}')
-        return {"hf_reachable": True, "raw_response": text[:300], "model": HF_MODEL_NAME}
+        raw = call_gemini('Reply with ONLY valid JSON, no markdown: {"status":"gemini_ok"}')
+        return {
+            "gemini_reachable": True,
+            "raw_response": raw[:300],
+            "model": "gemini-2.0-flash"
+        }
     except HTTPException as e:
-        return {"hf_reachable": False, "detail": e.detail}
+        return {"gemini_reachable": False, "detail": e.detail}
+
 
 @app.post("/pdf-to-json", tags=["PDF Parser"])
 async def parse_lab_report_pdf(file: UploadFile = File(...)):
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files accepted.")
+
     pdf_bytes = await file.read()
     if not pdf_bytes:
-        raise HTTPException(400, "Empty file.")
+        raise HTTPException(400, "Empty file uploaded.")
+
+    # Extract text
     try:
         raw_text = extract_text_from_pdf(pdf_bytes)
     except Exception as e:
         raise HTTPException(422, f"Text extraction failed: {e}")
+
     if not raw_text or len(raw_text) < 10:
-        raise HTTPException(422, "PDF empty or scanned image — no extractable text.")
+        raise HTTPException(
+            422,
+            "PDF appears to be a scanned image with no extractable text. "
+            "Please upload a text-based PDF."
+        )
 
     prompt = f"""You are a medical data extraction assistant.
-Extract lab report data and return ONLY valid JSON. No markdown, no explanation.
+Extract all lab report data from the text below and return ONLY a valid JSON object.
+Do NOT include markdown formatting, code fences, or any explanation — pure JSON only.
 
 Lab Report Text:
 {raw_text[:6000]}
 
-JSON structure (null for missing fields):
+Required JSON structure (use null for any missing fields):
 {{
   "report_metadata": {{
-    "lab_name": null, "patient_name": null, "patient_age": null,
-    "patient_gender": null, "date": null, "report_id": null
+    "lab_name": null,
+    "patient_name": null,
+    "patient_age": null,
+    "patient_gender": null,
+    "date": null,
+    "report_id": null
   }},
   "test_results": [
-    {{"test_name": "string", "value": "string", "unit": null,
-      "reference_range": null, "status": "Normal or High or Low or Unknown"}}
+    {{
+      "test_name": "string",
+      "value": "string",
+      "unit": null,
+      "reference_range": null,
+      "status": "Normal or High or Low or Unknown"
+    }}
   ],
   "abnormal_flags": [],
   "overall_impression": "string"
 }}"""
 
-    raw = call_huggingface(prompt)
+    raw = call_gemini(prompt)
+
     try:
-        return json.loads(clean_json_response(raw))
+        cleaned = clean_json_response(raw)
+        return json.loads(cleaned)
     except (ValueError, json.JSONDecodeError) as e:
-        raise HTTPException(500, {"error": "Invalid JSON from Hugging Face", "parse_error": str(e), "hf_output": raw[:500]})
-
-@app.get("/health", tags=["Meta"])
-def health():
-    return {"status": "ok", "api_key_configured": bool(HF_API_KEY), "model": HF_MODEL_NAME}
-
-@app.get("/", tags=["Meta"])
-def root():
-    return {"message": "MediChain API is running", "model": HF_MODEL_NAME, "docs": "/docs"}
+        raise HTTPException(500, {
+            "error": "Gemini returned invalid JSON",
+            "parse_error": str(e),
+            "gemini_output_preview": raw[:500]
+        })
