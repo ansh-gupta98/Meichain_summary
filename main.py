@@ -12,7 +12,7 @@ app.add_middleware(
 )
 
 # ── Gemini setup (lazy — won't crash on startup if key missing) ───────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDBISr99uV9tRxaunA_AHo7G_Za9LsPJls")
 _model = None  # initialized on first request, not at import time
 
 def get_model():
