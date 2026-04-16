@@ -23,7 +23,7 @@ app.add_middleware(
 )
 
 # ── Gemini Setup ──────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDBISr99uV9tRxaunA_AHo7G_Za9LsPJls")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
