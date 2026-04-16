@@ -102,7 +102,7 @@ def health():
     return {
         "status": "ok",
         "api_key_configured": bool(GEMINI_API_KEY),
-        "model": "gemini-2.0-flash"
+        "model": "gemini-3-flash-preview"
     }
 
 
