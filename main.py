@@ -14,7 +14,7 @@ app.add_middleware(
 
 # ── Gemini setup (lazy — won't crash on startup if key missing) ───────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL_NAME = "gemini-2.0-flash"   # ✅ Fixed: was "gemini-3-flash-preview" (doesn't exist)
+MODEL_NAME = "gemini-3-flash-preview"   # ✅ Fixed: was "gemini-3-flash-preview" (doesn't exist)
 _model = None
 
 def get_model():
