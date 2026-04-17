@@ -4,6 +4,8 @@ from pydantic import BaseModel
 import os, json, re, traceback
 import fitz  # PyMuPDF
 import google.generativeai as genai
+import base64
+
 
 # ── App setup ────────────────────────────────────────────────────────────────
 app = FastAPI(title="MediChain API", version="2.0.0")
@@ -291,3 +293,121 @@ Avoid jargon. Use short sentences. Do NOT return JSON — return readable paragr
         "language": language,
         "model": MODEL_NAME
     }
+
+@app.post("/image-to-json", tags=["Image Parser"])
+async def parse_bill_prescription_image(file: UploadFile = File(...), image_type: str = "prescription"):
+    """
+    Extract prescription or bill data from an image and return structured JSON.
+    
+    Parameters:
+    - file: Image file (JPEG, PNG, WebP)
+    - image_type: Either "prescription" or "bill" (default: "prescription")
+    
+    Returns JSON with extracted data suitable for Kotlin Retrofit.
+    """
+    if not (file.filename or "").lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        raise HTTPException(400, "Only image files accepted (JPEG, PNG, WebP).")
+    
+    if file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+        raise HTTPException(400, "Unsupported file type. Use JPEG, PNG, or WebP.")
+    
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(400, "Empty file uploaded.")
+    
+    # Convert image to base64 for Gemini
+    image_base64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    mime_type = file.content_type
+    
+    if image_type.lower() == "prescription":
+        json_schema = """{
+  "prescription": {
+    "doctor_name": null,
+    "doctor_contact": null,
+    "issued_date": null,
+    "clinic_name": null,
+    "medicines": [
+      {
+        "medicine_name": "string",
+        "dosage": "string",
+        "frequency": "string",
+        "instructions": null
+      }
+    ]
+  }
+}"""
+        extract_instruction = "Extract prescription details from the image. For each medicine, extract: medicine name, dosage (e.g., 500mg), frequency (e.g., 3 times daily), and optional instructions (e.g., take with food)."
+    else:  # bill
+        json_schema = """{
+  "billing": {
+    "invoice_id": null,
+    "date": null,
+    "clinic_name": null,
+    "clinic_address": null,
+    "patient_name": null,
+    "total_amount": null,
+    "currency": "INR",
+    "billing_items": [
+      {
+        "item_name": "string",
+        "quantity": 1,
+        "unit_price": null,
+        "total_price": null
+      }
+    ],
+    "discount": null,
+    "net_amount": null,
+    "payment_status": null
+  }
+}"""
+        extract_instruction = "Extract billing and invoice details from the image."
+    
+    prompt = f"""You are a medical document OCR assistant.
+{extract_instruction} Read all text from the image carefully and return ONLY a valid JSON object.
+Do NOT include markdown formatting, code fences, or any explanation — pure JSON only.
+
+Expected JSON structure (use null for any missing fields):
+{json_schema}"""
+    
+    try:
+        model = get_model()
+        response = model.generate_content([
+            {
+                "mime_type": mime_type,
+                "data": image_base64,
+            },
+            prompt
+        ])
+        raw = response.text
+        
+        if not raw:
+            raise ValueError("Gemini returned empty content.")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("=" * 60)
+        print(f"GEMINI IMAGE PROCESSING FAILED | {type(e).__name__}: {e}")
+        print(traceback.format_exc())
+        print("=" * 60)
+        raise HTTPException(status_code=502, detail={
+            "error": "Gemini image processing failed",
+            "exception_type": type(e).__name__,
+            "exception_msg": str(e)
+        })
+    
+    try:
+        cleaned = clean_json_response(raw)
+        parsed = json.loads(cleaned)
+        return {
+            "success": True,
+            "image_type": image_type,
+            "data": parsed,
+            "model": MODEL_NAME
+        }
+    except (ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(500, {
+            "error": "Gemini returned invalid JSON",
+            "parse_error": str(e),
+            "gemini_output_preview": raw[:500]
+        })
